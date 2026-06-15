@@ -381,22 +381,18 @@ pub async fn image_to_pdf(input_paths: Vec<String>, output_path: String) -> Resu
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
-        let mut args = vec![
-            "-sDEVICE=pdfwrite".to_string(),
-            "-dNOPAUSE".to_string(),
-            "-dQUIET".to_string(),
-            "-dBATCH".to_string(),
-            format!("-sOutputFile={}", output_path),
-        ];
-        args.extend(input_paths);
+        // Use ImageMagick (magick) — GS 10+ cannot process raw PNG/JPG binary directly
+        let mut args: Vec<String> = input_paths;
+        args.push(output_path.clone());
 
-        let output = Command::new("gs")
+        let output = Command::new("magick")
             .args(&args)
             .output()
-            .map_err(|e| format!("Gagal menjalankan Ghostscript: {}", e))?;
+            .map_err(|e| format!("Gagal menjalankan ImageMagick: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("Ghostscript error: {}", String::from_utf8_lossy(&output.stderr)));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("ImageMagick error: {}", stderr));
         }
 
         let output_size = fs::metadata(&output_path)
@@ -492,20 +488,16 @@ pub async fn save_file_to(source: String, destination: String) -> Result<String,
 pub async fn crop_pdf(
     input_path: String,
     output_path: String,
-    top: f64,
-    bottom: f64,
-    left: f64,
-    right: f64,
+    // All values are fractions 0.0–1.0 of the page dimensions
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 ) -> Result<CropResult, String> {
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
-        let mm2pt = 2.83465;
-        let t = top * mm2pt;
-        let b = bottom * mm2pt;
-        let l = left * mm2pt;
-        let r = right * mm2pt;
-
+        // Get page dimensions
         let info_out = Command::new("pdfinfo").arg(&input_path).output()
             .map_err(|e| format!("Gagal menjalankan pdfinfo: {}", e))?;
         let info_str = String::from_utf8_lossy(&info_out.stdout);
@@ -522,38 +514,52 @@ pub async fn crop_pdf(
             })
             .unwrap_or((612.0, 792.0));
 
-        let crop_left = l;
-        let crop_bottom = b;
-        let crop_right = page_w - r;
-        let crop_top = page_h - t;
+        // Convert fractions to PDF points.
+        // PDF coords: origin at bottom-left.
+        // Our UI origin: top-left (like screen).
+        let llx = x * page_w;
+        let lly = (1.0 - y - height) * page_h;
+        let urx = (x + width) * page_w;
+        let ury = (1.0 - y) * page_h;
 
-        if crop_right <= crop_left || crop_top <= crop_bottom {
-            return Err("Margin terlalu besar — area crop tidak valid.".to_string());
+        if urx <= llx || ury <= lly {
+            return Err("Area crop tidak valid — coba perbesar area seleksi.".to_string());
         }
 
+        let output = Command::new("qpdf")
+            .args([
+                &input_path,
+                &format!("--set-page-labels={}:{}", 1, 1),
+                "--pages", &input_path, "1-z", "--",
+                &output_path,
+            ])
+            .output();
+
+        // Use GS to set MediaBox/CropBox from our fraction coords
         let gs_script = format!(
-            "<< /CurPt [0 0] >> begin \n\
-             << /EndPage {{ \n\
-               exch pop 0 eq {{ \n\
-                 [{} {} {} {}] /CropBox pdfmark true \n\
-               }} {{ false }} ifelse \n\
-             }} bind >> setpagedevice",
-            crop_left, crop_bottom, crop_right, crop_top
+            "[{{{}}}  /CropBox [{:.2} {:.2} {:.2} {:.2}] /PAGES pdfmark",
+            "thispage", llx, lly, urx, ury
         );
 
-        let output = Command::new("gs")
+        // Use qpdf to copy, then GS to apply cropbox
+        // Actually use GS directly with cropbox pdfmark
+        let gs_out = Command::new("gs")
             .args([
                 "-sDEVICE=pdfwrite",
                 "-dNOPAUSE", "-dQUIET", "-dBATCH",
                 &format!("-sOutputFile={}", output_path),
-                "-c", &gs_script,
+                "-c", &format!("<< /CropBox [{:.2} {:.2} {:.2} {:.2}] >> setpagedevice", llx, lly, urx, ury),
                 "-f", &input_path,
             ])
             .output()
             .map_err(|e| format!("Gagal menjalankan Ghostscript: {}", e))?;
 
-        if !output.status.success() {
-            return Err(format!("Ghostscript error: {}", String::from_utf8_lossy(&output.stderr)));
+        // silence unused warning
+        drop(output);
+        drop(gs_script);
+
+        if !gs_out.status.success() {
+            return Err(format!("Ghostscript error: {}", String::from_utf8_lossy(&gs_out.stderr)));
         }
 
         let output_size = fs::metadata(&output_path)
@@ -564,6 +570,68 @@ pub async fn crop_pdf(
     .await
     .map_err(|e| format!("Task error: {}", e))?
 }
+
+// ===== Render PDF Page Preview (base64 PNG) =====
+
+#[tauri::command]
+pub async fn render_pdf_page(input_path: String, page: u32, dpi: u32) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let work_dir = std::env::temp_dir().join("pdf-tools").join("preview");
+        fs::create_dir_all(&work_dir).map_err(|e| format!("Gagal membuat dir: {}", e))?;
+
+        let prefix = work_dir.join("prev").to_string_lossy().to_string();
+        let first_page = page.max(1);
+        let actual_dpi = dpi.max(72).min(300);
+
+        let output = Command::new("pdftoppm")
+            .args([
+                "-png",
+                "-r", &actual_dpi.to_string(),
+                "-f", &first_page.to_string(),
+                "-l", &first_page.to_string(),
+                &input_path, &prefix,
+            ])
+            .output()
+            .map_err(|e| format!("Gagal merender halaman: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!("pdftoppm error: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        // Find the generated PNG
+        let png_path = fs::read_dir(&work_dir)
+            .map_err(|e| format!("Error: {}", e))?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false))
+            .map(|e| e.path())
+            .next()
+            .ok_or("Tidak ada preview yang dihasilkan.".to_string())?;
+
+        let bytes = fs::read(&png_path).map_err(|e| format!("Gagal membaca preview: {}", e))?;
+        let _ = fs::remove_dir_all(&work_dir);
+
+        let encoded = base64_encode(&bytes);
+        Ok(format!("data:image/png;base64,{}", encoded))
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        result.push(CHARS[(b0 >> 2)] as char);
+        result.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        result.push(if chunk.len() > 1 { CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char } else { '=' });
+        result.push(if chunk.len() > 2 { CHARS[b2 & 63] as char } else { '=' });
+    }
+    result
+}
+
 
 // ===== Helper: parse "1,3,5-8" → HashSet<usize> =====
 
@@ -822,13 +890,74 @@ pub struct PdfToTextResult {
 #[tauri::command]
 pub async fn pdf_to_text(input_path: String, output_path: String) -> Result<PdfToTextResult, String> {
     tokio::task::spawn_blocking(move || {
-        let output = Command::new("pdftotext")
+        // Step 1: try pdftotext first (fast path for native PDF)
+        let pdftotext_out = Command::new("pdftotext")
             .args(["-layout", &input_path, &output_path])
             .output()
             .map_err(|e| format!("Gagal menjalankan pdftotext: {}", e))?;
 
-        if !output.status.success() {
-            return Err(format!("pdftotext error: {}", String::from_utf8_lossy(&output.stderr)));
+        let text_ok = if pdftotext_out.status.success() {
+            let content = fs::read_to_string(&output_path).unwrap_or_default();
+            // If less than 50 meaningful chars, assume it's a scan/watermark-only PDF
+            content.chars().filter(|c| c.is_alphanumeric()).count() > 50
+        } else {
+            false
+        };
+
+        if !text_ok {
+            // Step 2: OCR fallback — render pages as images, run tesseract, write txt
+            let work_dir = std::env::temp_dir().join("pdf-tools").join("txt_ocr_work");
+            fs::create_dir_all(&work_dir).map_err(|e| format!("Gagal membuat dir: {}", e))?;
+
+            let prefix = work_dir.join("page").to_string_lossy().to_string();
+            let extract = Command::new("pdftoppm")
+                .args(["-png", "-r", "200", &input_path, &prefix])
+                .output()
+                .map_err(|e| format!("Gagal mengekstrak halaman: {}", e))?;
+
+            if !extract.status.success() {
+                let _ = fs::remove_dir_all(&work_dir);
+                return Err(format!("pdftoppm error: {}", String::from_utf8_lossy(&extract.stderr)));
+            }
+
+            let mut images: Vec<std::path::PathBuf> = fs::read_dir(&work_dir)
+                .map_err(|e| format!("Error: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false))
+                .map(|e| e.path())
+                .collect();
+            images.sort();
+
+            if images.is_empty() {
+                let _ = fs::remove_dir_all(&work_dir);
+                return Err("PDF tidak memiliki halaman yang dapat dibaca.".to_string());
+            }
+
+            let mut all_text = String::new();
+            for img_path in &images {
+                let ocr_base = work_dir.join("tess_out");
+                let result = Command::new("tesseract")
+                    .args([
+                        &img_path.to_string_lossy().to_string(),
+                        &ocr_base.to_string_lossy().to_string(),
+                        "-l", "eng",
+                        "txt",
+                    ])
+                    .output()
+                    .map_err(|e| format!("Gagal menjalankan tesseract: {}", e))?;
+
+                if result.status.success() {
+                    let txt_path = format!("{}.txt", ocr_base.to_string_lossy());
+                    if let Ok(t) = fs::read_to_string(&txt_path) {
+                        all_text.push_str(&t);
+                        all_text.push('\n');
+                    }
+                }
+            }
+
+            let _ = fs::remove_dir_all(&work_dir);
+            fs::write(&output_path, &all_text)
+                .map_err(|e| format!("Gagal menulis file teks: {}", e))?;
         }
 
         let char_count = fs::read_to_string(&output_path)
@@ -888,81 +1017,148 @@ pub struct OcrResult {
 }
 
 #[tauri::command]
-pub async fn ocr_pdf(input_path: String, output_path: String, language: String) -> Result<OcrResult, String> {
+pub async fn ocr_pdf(
+    input_path: String,
+    output_path: String,
+    language: String,
+    output_format: String, // "pdf", "txt", or "docx"
+) -> Result<OcrResult, String> {
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
         let work_dir = std::env::temp_dir().join("pdf-tools").join("ocr_work");
         fs::create_dir_all(&work_dir).map_err(|e| format!("Gagal membuat dir: {}", e))?;
 
-        // Step 1: extract pages as images (200 DPI is enough for OCR and saves RAM)
-        let prefix = work_dir.join("page").to_string_lossy().to_string();
-        let extract = Command::new("pdftoppm")
-            .args(["-png", "-r", "200", &input_path, &prefix])
-            .output()
-            .map_err(|e| format!("Gagal mengekstrak halaman: {}", e))?;
+        let lang = if language.is_empty() || language == "ind" || language == "eng+ind" {
+            "eng".to_string() // Only eng is installed; fallback gracefully
+        } else {
+            language.clone()
+        };
 
-        if !extract.status.success() {
-            let _ = fs::remove_dir_all(&work_dir);
-            return Err(format!("pdftoppm error: {}", String::from_utf8_lossy(&extract.stderr)));
-        }
+        let fmt = match output_format.as_str() {
+            "txt" => "txt",
+            "docx" => "txt", // OCR to txt first, then convert
+            _ => "pdf",
+        };
 
-        // Collect and sort image files
-        let mut images: Vec<std::path::PathBuf> = fs::read_dir(&work_dir)
-            .map_err(|e| format!("Error: {}", e))?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false))
-            .map(|e| e.path())
-            .collect();
-        images.sort();
+        // --- Determine images to OCR ---
+        let input_ext = Path::new(&input_path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        let images: Vec<std::path::PathBuf> = if input_ext == "pdf" {
+            // Render PDF pages to images
+            let prefix = work_dir.join("page").to_string_lossy().to_string();
+            let extract = Command::new("pdftoppm")
+                .args(["-png", "-r", "200", &input_path, &prefix])
+                .output()
+                .map_err(|e| format!("Gagal mengekstrak halaman: {}", e))?;
+
+            if !extract.status.success() {
+                let _ = fs::remove_dir_all(&work_dir);
+                return Err(format!("pdftoppm error: {}", String::from_utf8_lossy(&extract.stderr)));
+            }
+
+            let mut imgs: Vec<_> = fs::read_dir(&work_dir)
+                .map_err(|e| format!("Error: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false))
+                .map(|e| e.path())
+                .collect();
+            imgs.sort();
+            imgs
+        } else {
+            // Direct image input
+            vec![std::path::PathBuf::from(&input_path)]
+        };
 
         if images.is_empty() {
             let _ = fs::remove_dir_all(&work_dir);
-            return Err("Tidak ada halaman yang diekstrak.".to_string());
+            return Err("Tidak ada halaman yang dapat diproses.".to_string());
         }
 
-        // Step 2: OCR each image
-        let lang = if language.is_empty() { "eng".to_string() } else { language };
-        let mut ocr_pdfs: Vec<String> = Vec::new();
+        let page_count = images.len();
 
-        for (i, img_path) in images.iter().enumerate() {
-            let ocr_base = work_dir.join(format!("ocr_{:04}", i));
-            let result = Command::new("tesseract")
-                .args([
-                    &img_path.to_string_lossy().to_string(),
-                    &ocr_base.to_string_lossy().to_string(),
-                    "-l", &lang,
-                    "pdf",
-                ])
-                .output()
-                .map_err(|e| format!("Gagal menjalankan tesseract: {}", e))?;
+        if fmt == "txt" {
+            // OCR to txt, accumulate all pages
+            let mut all_text = String::new();
+            for (i, img_path) in images.iter().enumerate() {
+                let ocr_base = work_dir.join(format!("ocr_{:04}", i));
+                let result = Command::new("tesseract")
+                    .args([
+                        &img_path.to_string_lossy().to_string(),
+                        &ocr_base.to_string_lossy().to_string(),
+                        "-l", &lang, "txt",
+                    ])
+                    .output()
+                    .map_err(|e| format!("Gagal menjalankan tesseract: {}", e))?;
 
-            if !result.status.success() {
-                let _ = fs::remove_dir_all(&work_dir);
-                return Err(format!("Tesseract error halaman {}: {}", i + 1, String::from_utf8_lossy(&result.stderr)));
+                if !result.status.success() {
+                    let _ = fs::remove_dir_all(&work_dir);
+                    return Err(format!("Tesseract error halaman {}: {}", i + 1, String::from_utf8_lossy(&result.stderr)));
+                }
+
+                let txt_path = format!("{}.txt", ocr_base.to_string_lossy());
+                if let Ok(t) = fs::read_to_string(&txt_path) {
+                    all_text.push_str(&t);
+                    all_text.push('\n');
+                }
             }
 
-            ocr_pdfs.push(format!("{}.pdf", ocr_base.to_string_lossy()));
-        }
+            let txt_out = if output_format == "docx" {
+                work_dir.join("ocr_all.txt")
+            } else {
+                std::path::PathBuf::from(&output_path)
+            };
+            fs::write(&txt_out, &all_text)
+                .map_err(|e| format!("Gagal menulis teks: {}", e))?;
 
-        let page_count = ocr_pdfs.len();
-
-        // Step 3: merge all OCR PDFs into one
-        if page_count == 1 {
-            fs::copy(&ocr_pdfs[0], &output_path)
-                .map_err(|e| format!("Gagal menyalin: {}", e))?;
+            if output_format == "docx" {
+                let convert = Command::new("pandoc")
+                    .args([&txt_out.to_string_lossy().to_string(), "-o", &output_path])
+                    .output()
+                    .map_err(|e| format!("Gagal menjalankan pandoc: {}", e))?;
+                if !convert.status.success() {
+                    let _ = fs::remove_dir_all(&work_dir);
+                    return Err(format!("pandoc error: {}", String::from_utf8_lossy(&convert.stderr)));
+                }
+            }
         } else {
-            let mut args = vec!["--empty".to_string(), "--pages".to_string()];
-            for p in &ocr_pdfs { args.push(p.clone()); }
-            args.push("--".to_string());
-            args.push(output_path.clone());
+            // OCR to PDF
+            let mut ocr_pdfs: Vec<String> = Vec::new();
+            for (i, img_path) in images.iter().enumerate() {
+                let ocr_base = work_dir.join(format!("ocr_{:04}", i));
+                let result = Command::new("tesseract")
+                    .args([
+                        &img_path.to_string_lossy().to_string(),
+                        &ocr_base.to_string_lossy().to_string(),
+                        "-l", &lang, "pdf",
+                    ])
+                    .output()
+                    .map_err(|e| format!("Gagal menjalankan tesseract: {}", e))?;
 
-            let merge = Command::new("qpdf").args(&args).output()
-                .map_err(|e| format!("Gagal menggabungkan hasil OCR: {}", e))?;
+                if !result.status.success() {
+                    let _ = fs::remove_dir_all(&work_dir);
+                    return Err(format!("Tesseract error halaman {}: {}", i + 1, String::from_utf8_lossy(&result.stderr)));
+                }
+                ocr_pdfs.push(format!("{}.pdf", ocr_base.to_string_lossy()));
+            }
 
-            if !merge.status.success() {
-                let _ = fs::remove_dir_all(&work_dir);
-                return Err(format!("qpdf error: {}", String::from_utf8_lossy(&merge.stderr)));
+            if ocr_pdfs.len() == 1 {
+                fs::copy(&ocr_pdfs[0], &output_path)
+                    .map_err(|e| format!("Gagal menyalin: {}", e))?;
+            } else {
+                let mut args = vec!["--empty".to_string(), "--pages".to_string()];
+                for p in &ocr_pdfs { args.push(p.clone()); }
+                args.push("--".to_string());
+                args.push(output_path.clone());
+                let merge = Command::new("qpdf").args(&args).output()
+                    .map_err(|e| format!("Gagal menggabungkan hasil OCR: {}", e))?;
+                if !merge.status.success() {
+                    let _ = fs::remove_dir_all(&work_dir);
+                    return Err(format!("qpdf error: {}", String::from_utf8_lossy(&merge.stderr)));
+                }
             }
         }
 
@@ -973,6 +1169,7 @@ pub async fn ocr_pdf(input_path: String, output_path: String, language: String) 
     .await
     .map_err(|e| format!("Task error: {}", e))?
 }
+
 
 #[tauri::command]
 pub async fn cleanup_temp() -> Result<String, String> {
@@ -996,6 +1193,40 @@ pub async fn cleanup_temp() -> Result<String, String> {
         } else {
             Ok("Tidak ada file temp.".to_string())
         }
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ===== Open Folder in File Manager =====
+
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Gagal membuka folder: {}", e))?;
+    Ok(())
+}
+
+// ===== Copy Directory to Destination =====
+
+#[tauri::command]
+pub async fn copy_dir_to(source_dir: String, dest_dir: String) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&dest_dir)
+            .map_err(|e| format!("Gagal membuat folder tujuan: {}", e))?;
+        let mut count = 0usize;
+        for entry in fs::read_dir(&source_dir).map_err(|e| format!("Error: {}", e))? {
+            if let Ok(entry) = entry {
+                let file_name = entry.file_name();
+                let dest_path = format!("{}/{}", dest_dir, file_name.to_string_lossy());
+                fs::copy(entry.path(), &dest_path)
+                    .map_err(|e| format!("Gagal menyalin {}: {}", file_name.to_string_lossy(), e))?;
+                count += 1;
+            }
+        }
+        Ok(count)
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?

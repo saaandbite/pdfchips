@@ -42,6 +42,9 @@ pub fn run() {
       pdf_engine::pdf_to_text,
       pdf_engine::grayscale_pdf,
       pdf_engine::ocr_pdf,
+      pdf_engine::open_folder,
+      pdf_engine::copy_dir_to,
+      pdf_engine::render_pdf_page,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

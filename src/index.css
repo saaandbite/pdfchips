@@ -504,6 +504,32 @@ a { text-decoration: none; color: inherit; }
   cursor: not-allowed;
 }
 
+.btn-secondary {
+  width: 100%;
+  padding: 14px 20px;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1.5px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-family: inherit;
+  letter-spacing: -0.1px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+
 .btn-back {
   display: inline-flex;
   align-items: center;
