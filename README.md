@@ -1,7 +1,7 @@
 # PDF & Chips
 
-[![npm version](https://img.shields.io/npm/v/pdf-chips.svg)](https://www.npmjs.com/package/pdf-chips)
-[![npm downloads](https://img.shields.io/npm/dm/pdf-chips.svg)](https://www.npmjs.com/package/pdf-chips)
+[![npm version](https://img.shields.io/npm/v/pdflinux.svg)](https://www.npmjs.com/package/pdflinux)
+[![npm downloads](https://img.shields.io/npm/dm/pdflinux.svg)](https://www.npmjs.com/package/pdflinux)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)](#install)
 
