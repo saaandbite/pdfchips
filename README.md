@@ -66,7 +66,7 @@ Most online PDF tools require you to upload your files to their servers. For sen
 
 ## Features
 
-17 PDF tools, all running locally on your machine:
+21 tools, all running locally on your machine:
 
 | Tool | Description |
 |---|---|
@@ -87,6 +87,10 @@ Most online PDF tools require you to upload your files to their servers. For sen
 | **Grayscale** | Convert a color PDF to black and white |
 | **OCR** | Run optical character recognition on scanned pages |
 | **PDF Info** | Inspect metadata: page count, dimensions, title, author |
+| **TXT → PDF** | Convert plain text files (.txt) to PDF via LibreOffice |
+| **Markdown → PDF** | Convert Markdown (.md) to PDF via pandoc or LibreOffice |
+| **Word → PDF** | Convert Word documents (.docx, .doc, .odt, .rtf) to PDF via LibreOffice |
+| **PPT → PDF** | Convert presentations (.pptx, .ppt, .odp) to PDF via LibreOffice |
 
 ---
 
@@ -100,6 +104,8 @@ PDF & Chips relies on a few native CLI utilities for PDF processing. The install
 | **Poppler** (`pdfinfo`, `pdftoppm`, `pdftotext`) | PDF info, preview, text extraction | `apt/dnf/pacman` | [release zip](https://github.com/oschwartz10612/poppler-windows/releases) | `brew` |
 | **QPDF** | Merge, Split, Encrypt, Decrypt, Reorder | `apt/dnf/pacman` | `winget` | `brew` |
 | **Tesseract** | OCR | `apt/dnf/pacman` | `winget` | `brew` |
+| **LibreOffice** | TXT/Word/PPT → PDF | `apt/dnf/pacman` | [libreoffice.org](https://www.libreoffice.org/download/download-libreoffice/) | `brew` / [libreoffice.org](https://www.libreoffice.org/download/download-libreoffice/) |
+| **pandoc** + **xelatex** | Markdown → PDF (optional, best quality) | `apt install pandoc texlive-xetex` | [pandoc.org](https://pandoc.org/installing.html) | `brew install pandoc` |
 
 > On **Windows** the tools must be on your system `PATH`. The installer gives step-by-step instructions if any are missing.
 
