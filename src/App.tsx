@@ -22,6 +22,10 @@ const PdfPageNumbers = lazy(() => import('./pages/PdfPageNumbers'));
 const PdfToText = lazy(() => import('./pages/PdfToText'));
 const PdfGrayscale = lazy(() => import('./pages/PdfGrayscale'));
 const PdfOcr = lazy(() => import('./pages/PdfOcr'));
+const TxtToPdf = lazy(() => import('./pages/TxtToPdf'));
+const MarkdownToPdf = lazy(() => import('./pages/MarkdownToPdf'));
+const WordToPdf = lazy(() => import('./pages/WordToPdf'));
+const PptToPdf = lazy(() => import('./pages/PptToPdf'));
 
 function PageLoader() {
   return (
@@ -59,6 +63,10 @@ export default function App() {
               <Route path="/to-text" element={<PdfToText />} />
               <Route path="/grayscale" element={<PdfGrayscale />} />
               <Route path="/ocr" element={<PdfOcr />} />
+              <Route path="/txt-to-pdf" element={<TxtToPdf />} />
+              <Route path="/markdown-to-pdf" element={<MarkdownToPdf />} />
+              <Route path="/word-to-pdf" element={<WordToPdf />} />
+              <Route path="/ppt-to-pdf" element={<PptToPdf />} />
             </Routes>
           </Suspense>
         </main>

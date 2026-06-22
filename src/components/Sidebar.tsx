@@ -30,10 +30,19 @@ const groups = [
   {
     title: 'Konversi',
     items: [
-      { path: '/to-image',    label: 'PDF → Gambar',  icon: '▣' },
-      { path: '/image-to-pdf', label: 'Gambar → PDF', icon: '⊞' },
-      { path: '/to-text',     label: 'PDF → Teks',    icon: 'T' },
-      { path: '/ocr',         label: 'OCR Scan',      icon: '◎' },
+      { path: '/to-image',       label: 'PDF → Gambar',    icon: '▣' },
+      { path: '/image-to-pdf',   label: 'Gambar → PDF',    icon: '⊞' },
+      { path: '/to-text',        label: 'PDF → Teks',      icon: 'T' },
+      { path: '/ocr',            label: 'OCR Scan',        icon: '◎' },
+    ],
+  },
+  {
+    title: 'Ke PDF',
+    items: [
+      { path: '/txt-to-pdf',      label: 'TXT → PDF',      icon: '📄' },
+      { path: '/markdown-to-pdf', label: 'Markdown → PDF', icon: 'Ⓜ' },
+      { path: '/word-to-pdf',     label: 'Word → PDF',     icon: '📝' },
+      { path: '/ppt-to-pdf',      label: 'PPT → PDF',      icon: '📊' },
     ],
   },
   {

@@ -22,6 +22,17 @@ const groups = [
     tools: [
       { title: 'PDF → Gambar', desc: 'Konversi halaman ke PNG/JPG.', icon: '▣', path: '/to-image' },
       { title: 'Gambar → PDF', desc: 'Konversi gambar ke satu PDF.', icon: '⊞', path: '/image-to-pdf' },
+      { title: 'PDF → Teks',   desc: 'Ekstrak teks dari PDF ke .txt.', icon: 'T', path: '/to-text' },
+      { title: 'OCR Scan',     desc: 'Kenali teks dari PDF hasil scan.', icon: '◎', path: '/ocr' },
+    ],
+  },
+  {
+    title: 'Ke PDF',
+    tools: [
+      { title: 'TXT → PDF',      desc: 'Konversi teks biasa ke PDF.',        icon: '📄', path: '/txt-to-pdf' },
+      { title: 'Markdown → PDF', desc: 'Konversi file .md ke PDF.', icon: 'Ⓜ', path: '/markdown-to-pdf' },
+      { title: 'Word → PDF',     desc: 'Konversi .docx/.doc ke PDF.',        icon: '📝', path: '/word-to-pdf' },
+      { title: 'PPT → PDF',      desc: 'Konversi .pptx/.ppt ke PDF.',        icon: '📊', path: '/ppt-to-pdf' },
     ],
   },
   {

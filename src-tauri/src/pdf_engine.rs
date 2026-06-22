@@ -1238,3 +1238,209 @@ pub async fn copy_dir_to(source_dir: String, dest_dir: String) -> Result<usize, 
     .await
     .map_err(|e| format!("Task error: {}", e))?
 }
+
+// ===== Document → PDF Conversion (shared helpers) =====
+
+#[derive(Serialize, Clone)]
+pub struct ConvertResult {
+    pub output_path: String,
+    pub output_size: u64,
+}
+
+/// Find LibreOffice / soffice binary (cross-platform).
+fn find_libreoffice() -> Result<String, String> {
+    // Windows common paths first
+    #[cfg(target_os = "windows")]
+    let candidates = vec![
+        r"C:\Program Files\LibreOffice\program\soffice.exe".to_string(),
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe".to_string(),
+        "soffice".to_string(),
+        "libreoffice".to_string(),
+    ];
+    #[cfg(target_os = "macos")]
+    let candidates = vec![
+        "/Applications/LibreOffice.app/Contents/MacOS/soffice".to_string(),
+        "soffice".to_string(),
+        "libreoffice".to_string(),
+    ];
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let candidates = vec![
+        "libreoffice".to_string(),
+        "soffice".to_string(),
+    ];
+
+    for candidate in &candidates {
+        if Command::new(candidate)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(candidate.clone());
+        }
+    }
+    Err(
+        "LibreOffice tidak ditemukan. Install dengan:\n\
+         Linux : sudo apt install libreoffice  (atau dnf/pacman)\n\
+         Windows: https://www.libreoffice.org/download/download-libreoffice/\n\
+         macOS  : https://www.libreoffice.org/download/download-libreoffice/".to_string()
+    )
+}
+
+/// Convert any file to PDF using LibreOffice --headless.
+/// Output is written to `output_path`.
+fn libreoffice_convert(input_path: &str, output_path: &str) -> Result<(), String> {
+    let lo = find_libreoffice()?;
+
+    // LibreOffice writes to a temp dir; we then rename/copy to output_path
+    let temp_dir = std::env::temp_dir().join("pdf-chips-conv");
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Gagal membuat temp dir: {}", e))?;
+
+    let output = Command::new(&lo)
+        .args([
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", &temp_dir.to_string_lossy(),
+            input_path,
+        ])
+        .output()
+        .map_err(|e| format!("Gagal menjalankan LibreOffice: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("LibreOffice gagal: {}{}", stderr, stdout));
+    }
+
+    // LibreOffice names output based on input stem
+    let input_stem = Path::new(input_path)
+        .file_stem()
+        .ok_or("Nama file tidak valid")?
+        .to_string_lossy()
+        .to_string();
+
+    let generated = temp_dir.join(format!("{}.pdf", input_stem));
+
+    if generated.exists() {
+        fs::copy(&generated, output_path)
+            .map_err(|e| format!("Gagal menyalin hasil: {}", e))?;
+        fs::remove_file(&generated).ok();
+        return Ok(());
+    }
+
+    // Fallback: find any .pdf in temp_dir
+    let found = fs::read_dir(&temp_dir)
+        .ok()
+        .and_then(|mut d| d.find(|e| {
+            e.as_ref().ok()
+                .map(|e| e.path().extension().map(|x| x == "pdf").unwrap_or(false))
+                .unwrap_or(false)
+        }))
+        .and_then(|e| e.ok())
+        .map(|e| e.path());
+
+    if let Some(pdf_file) = found {
+        fs::copy(&pdf_file, output_path)
+            .map_err(|e| format!("Gagal menyalin hasil: {}", e))?;
+        fs::remove_file(&pdf_file).ok();
+        Ok(())
+    } else {
+        Err("LibreOffice tidak menghasilkan file PDF. Pastikan LibreOffice versi terbaru terinstall.".to_string())
+    }
+}
+
+// ===== TXT → PDF =====
+
+#[tauri::command]
+pub async fn txt_to_pdf(input_path: String, output_path: String) -> Result<ConvertResult, String> {
+    tokio::task::spawn_blocking(move || {
+        libreoffice_convert(&input_path, &output_path)?;
+        let output_size = fs::metadata(&output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(ConvertResult { output_path, output_size })
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ===== Markdown → PDF =====
+
+#[tauri::command]
+pub async fn markdown_to_pdf(input_path: String, output_path: String) -> Result<ConvertResult, String> {
+    tokio::task::spawn_blocking(move || {
+        // Try pandoc first (best Markdown rendering)
+        let pandoc_result = Command::new("pandoc")
+            .args([
+                &input_path,
+                "-o", &output_path,
+                "--pdf-engine=xelatex",
+                "--variable", "geometry:margin=2cm",
+            ])
+            .output();
+
+        if let Ok(out) = pandoc_result {
+            if out.status.success() && Path::new(&output_path).exists() {
+                let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult { output_path, output_size });
+            }
+        }
+
+        // Fallback 1: pandoc with wkhtmltopdf engine
+        let pandoc_wk = Command::new("pandoc")
+            .args([
+                &input_path,
+                "-o", &output_path,
+                "--pdf-engine=wkhtmltopdf",
+            ])
+            .output();
+
+        if let Ok(out) = pandoc_wk {
+            if out.status.success() && Path::new(&output_path).exists() {
+                let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+                return Ok(ConvertResult { output_path, output_size });
+            }
+        }
+
+        // Fallback 2: LibreOffice (treats .md as plain text)
+        libreoffice_convert(&input_path, &output_path)
+            .map_err(|_| {
+                "Konversi Markdown ke PDF membutuhkan:\n\
+                 - pandoc + xelatex (terbaik): sudo apt install pandoc texlive-xetex\n\
+                 - atau pandoc + wkhtmltopdf: sudo apt install pandoc wkhtmltopdf\n\
+                 - atau LibreOffice: sudo apt install libreoffice".to_string()
+            })?;
+
+        let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        Ok(ConvertResult { output_path, output_size })
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ===== Word (.docx) → PDF =====
+
+#[tauri::command]
+pub async fn word_to_pdf(input_path: String, output_path: String) -> Result<ConvertResult, String> {
+    tokio::task::spawn_blocking(move || {
+        libreoffice_convert(&input_path, &output_path)?;
+        let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        Ok(ConvertResult { output_path, output_size })
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
+
+// ===== PowerPoint (.pptx) → PDF =====
+
+#[tauri::command]
+pub async fn ppt_to_pdf(input_path: String, output_path: String) -> Result<ConvertResult, String> {
+    tokio::task::spawn_blocking(move || {
+        libreoffice_convert(&input_path, &output_path)?;
+        let output_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+        Ok(ConvertResult { output_path, output_size })
+    })
+    .await
+    .map_err(|e| format!("Task error: {}", e))?
+}
