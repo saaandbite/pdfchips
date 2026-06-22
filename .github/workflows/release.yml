@@ -61,8 +61,8 @@ jobs:
           rpm=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" 2>/dev/null | head -1)
           ai=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" 2>/dev/null | head -1)
 
-          [ -n "$deb" ] && cp "$deb" "artifacts/pdf-chips_${V}_amd64.deb"   && echo "deb: $deb"
-          [ -n "$rpm" ] && cp "$rpm" "artifacts/pdf-chips_${V}_x86_64.rpm"  && echo "rpm: $rpm"
+          [ -n "$deb" ] && cp "$deb" "artifacts/pdf-chips_${V}_amd64.deb"      && echo "deb: $deb"
+          [ -n "$rpm" ] && cp "$rpm" "artifacts/pdf-chips_${V}_x86_64.rpm"     && echo "rpm: $rpm"
           [ -n "$ai"  ] && cp "$ai"  "artifacts/pdf-chips_${V}_amd64.AppImage" && echo "AppImage: $ai"
 
           ls -lh artifacts/
@@ -73,7 +73,7 @@ jobs:
           name: linux-artifacts
           path: artifacts/*
 
-  # ── Windows build ────────────────────────────────────────────────────────────
+  # ── Windows build ─────────────────────────────────────────────────────────
   release-windows:
     runs-on: windows-latest
     steps:
@@ -120,7 +120,7 @@ jobs:
           name: windows-artifacts
           path: artifacts/*
 
-  # ── macOS build ───────────────────────────────────────────────────────────────
+  # ── macOS build ───────────────────────────────────────────────────────────
   release-macos:
     runs-on: macos-latest
     steps:
@@ -144,8 +144,11 @@ jobs:
       - name: Install npm dependencies
         run: npm install
 
-      - name: Build app (macOS dmg — universal)
-        run: npx tauri build --bundles dmg --target universal-apple-darwin
+      - name: Build app (macOS — arm64)
+        run: npx tauri build --bundles dmg --target aarch64-apple-darwin
+
+      - name: Build app (macOS — x86_64)
+        run: npx tauri build --bundles dmg --target x86_64-apple-darwin
 
       - name: Get version from tag
         id: version
@@ -156,8 +159,11 @@ jobs:
           mkdir -p artifacts
           V=${{ steps.version.outputs.version }}
 
-          dmg=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-          [ -n "$dmg" ] && cp "$dmg" "artifacts/PDF.and.Chips_${V}_universal.dmg" && echo "dmg: $dmg"
+          dmg_arm=$(find src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          dmg_x64=$(find src-tauri/target/x86_64-apple-darwin/release/bundle/dmg  -name "*.dmg" 2>/dev/null | head -1)
+
+          [ -n "$dmg_arm" ] && cp "$dmg_arm" "artifacts/PDF.and.Chips_${V}_aarch64.dmg" && echo "arm64 dmg: $dmg_arm"
+          [ -n "$dmg_x64" ] && cp "$dmg_x64" "artifacts/PDF.and.Chips_${V}_x86_64.dmg" && echo "x64 dmg: $dmg_x64"
 
           ls -lh artifacts/
 
@@ -167,7 +173,7 @@ jobs:
           name: macos-artifacts
           path: artifacts/*
 
-  # ── Create GitHub Release (after all platforms build) ────────────────────────
+  # ── Create GitHub Release (after all platforms build) ─────────────────────
   create-release:
     needs: [release-linux, release-windows, release-macos]
     runs-on: ubuntu-22.04
