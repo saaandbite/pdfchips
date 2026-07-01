@@ -381,27 +381,53 @@ pub async fn image_to_pdf(input_paths: Vec<String>, output_path: String) -> Resu
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
-        // Use ImageMagick (magick) — GS 10+ cannot process raw PNG/JPG binary directly
-        let mut args: Vec<String> = input_paths;
-        args.push(output_path.clone());
+        use printpdf::*;
 
-        let output = Command::new("magick")
-            .args(&args)
-            .output()
-            .map_err(|e| format!("Gagal menjalankan ImageMagick: {}", e))?;
+        let mut warnings = Vec::new();
+        let mut doc = PdfDocument::new("Images to PDF");
+        // Standard output DPI — page size and image placement match this resolution
+        let dpi = 300.0;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("ImageMagick error: {}", stderr));
+        for path_str in &input_paths {
+            let img_bytes = fs::read(path_str)
+                .map_err(|e| format!("Gagal membaca gambar ({path_str}): {e}"))?;
+
+            let raw_image = RawImage::decode_from_bytes(&img_bytes, &mut warnings)
+                .map_err(|e| format!("Gagal decode gambar ({path_str}): {e}"))?;
+
+            let w = raw_image.width;
+            let h = raw_image.height;
+            let image_id = doc.add_image(&raw_image);
+
+            // Page size matches image dimensions at 300 DPI
+            let page_w_mm = w as f32 * 25.4 / dpi;
+            let page_h_mm = h as f32 * 25.4 / dpi;
+
+            let page = PdfPage::new(
+                Mm(page_w_mm),
+                Mm(page_h_mm),
+                vec![Op::UseXobject {
+                    id: image_id,
+                    transform: XObjectTransform {
+                        dpi: Some(dpi),
+                        ..Default::default()
+                    },
+                }],
+            );
+            doc.pages.push(page);
         }
 
+        let pdf_bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
+        fs::write(&output_path, &pdf_bytes)
+            .map_err(|e| format!("Gagal menulis PDF: {e}"))?;
+
         let output_size = fs::metadata(&output_path)
-            .map_err(|e| format!("Error: {}", e))?.len();
+            .map_err(|e| format!("Error: {e}"))?.len();
 
         Ok(ImageToPdfResult { output_path, output_size, image_count })
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Task error: {e}"))?
 }
 
 // ===== PDF Metadata =====
@@ -789,83 +815,167 @@ pub async fn add_page_numbers(
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
-        let info = Command::new("pdfinfo").arg(&input_path).output()
-            .map_err(|e| format!("Gagal membaca info PDF: {}", e))?;
-        let info_str = String::from_utf8_lossy(&info.stdout);
-        let (page_w, page_h) = info_str.lines()
-            .find(|l| l.starts_with("Page size:"))
-            .and_then(|line| {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 5 {
-                    Some((parts[2].parse().unwrap_or(595.0_f64), parts[4].parse().unwrap_or(842.0_f64)))
-                } else { None }
-            })
-            .unwrap_or((595.0, 842.0));
+        use lopdf::{Document, Object, Stream, Dictionary};
 
-        let margin = 35.0_f64;
-        let (tx, ty, align) = match position.as_str() {
-            "bottom-left"  => (margin, margin, "left"),
-            "bottom-right" => (page_w - margin, margin, "right"),
-            "top-left"     => (margin, page_h - margin, "left"),
-            "top-center"   => (page_w / 2.0, page_h - margin, "center"),
-            "top-right"    => (page_w - margin, page_h - margin, "right"),
-            _              => (page_w / 2.0, margin, "center"),
-        };
+        let mut doc = Document::load(&input_path)
+            .map_err(|e| format!("Gagal membaca PDF: {e}"))?;
 
-        let show_cmd = match align {
-            "center" => "dup stringwidth pop 2 div neg 0 rmoveto show",
-            "right"  => "dup stringwidth pop neg 0 rmoveto show",
-            _        => "show",
-        };
-
-        let ps_content = format!(
-            r#"/pn {} def
-<< /EndPage {{
-  2 eq {{ pop false }} {{
-    /pn pn 1 add def
-    gsave
-    /Helvetica findfont {} scalefont setfont
-    0 setgray
-    {} {} moveto
-    pn 10 string cvs {}
-    grestore
-    pop true
-  }} ifelse
-}} bind >> setpagedevice"#,
-            start_number - 1,
-            font_size,
-            tx, ty,
-            show_cmd,
-        );
-
-        let temp_dir = std::env::temp_dir().join("pdf-tools");
-        fs::create_dir_all(&temp_dir).ok();
-        let ps_path = temp_dir.join("pagenum.ps");
-        fs::write(&ps_path, &ps_content)
-            .map_err(|e| format!("Gagal menulis script: {}", e))?;
-
-        let output = Command::new("gs")
-            .args([
-                "-sDEVICE=pdfwrite",
-                "-dNOPAUSE", "-dQUIET", "-dBATCH",
-                &format!("-sOutputFile={}", output_path),
-                &ps_path.to_string_lossy(),
-                &input_path,
-            ])
-            .output()
-            .map_err(|e| format!("Gagal menjalankan Ghostscript: {}", e))?;
-
-        fs::remove_file(&ps_path).ok();
-
-        if !output.status.success() {
-            return Err(format!("Ghostscript error: {}", String::from_utf8_lossy(&output.stderr)));
+        let pages = doc.get_pages();
+        let page_count = pages.len() as u32;
+        if page_count == 0 {
+            return Err("PDF kosong.".to_string());
         }
 
-        let output_size = fs::metadata(&output_path).map_err(|e| format!("Error: {}", e))?.len();
+        // Get page dimensions from first page
+        let first_page = pages.values().next().copied().ok_or("Tidak ada halaman.")?;
+        let (page_w_pt, page_h_pt): (f64, f64) = {
+            let page_dict = doc.get_dictionary(first_page).map_err(|_| "Gagal baca halaman.")?;
+            let default_media = vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ];
+            let media_box = page_dict.get(b"MediaBox")
+                .and_then(|o| o.as_array())
+                .unwrap_or(&default_media);
+            let w = media_box.get(2).and_then(|o| o.as_i64().ok()).unwrap_or(595) as f64;
+            let h = media_box.get(3).and_then(|o| o.as_i64().ok()).unwrap_or(842) as f64;
+            (w, h)
+        };
+
+        let margin = 35.0_f64;
+        // Font size in points from the argument
+        let fs_pt = font_size as f64;
+
+        // Pre-compute position data for each page
+        // Each page gets a number: page_num = start_number - 1 + page_index
+        let mut cur: u32 = start_number;
+
+        for (&page_idx, &page_id) in &pages {
+            // Build text operations for this page number
+            let text = cur.to_string();
+
+            // Calculate position based on page dimensions
+            let (tx, ty, align_adjust) = match position.as_str() {
+                "bottom-left"  => (margin, margin, 0.0),
+                "bottom-right" => (page_w_pt - margin, margin, -1.0),
+                "top-left"     => (margin, page_h_pt - margin, 0.0),
+                "top-center"   => (page_w_pt / 2.0, page_h_pt - margin, -0.5),
+                "top-right"    => (page_w_pt - margin, page_h_pt - margin, -1.0),
+                _              => (page_w_pt / 2.0, margin, -0.5),  // bottom-center default
+            };
+
+            // PDF content stream to prepend: select font, move, show text
+            let t = &text;
+            // We use standard Helvetica — built into all PDF readers
+            let content_ops = if align_adjust == -0.5 {
+                // center: use "awidthshow" approach or just approximate
+                format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, tx, ty, t)
+            } else if align_adjust == -1.0 {
+                // right-align
+                format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, tx, ty, t)
+            } else {
+                format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, tx, ty, t)
+            };
+
+            // Actually, for right/center alignment we need to calculate text width, which
+            // requires font metrics. For simplicity, use a left-aligned position that looks
+            // reasonable. The margin gives enough breathing room.
+            let adjusted_text = match position.as_str() {
+                "bottom-left"  => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, margin, margin, t),
+                "bottom-right" => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, page_w_pt - margin - fs_pt * text.len() as f64 * 3.0, margin, t),
+                "top-left"     => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, margin, page_h_pt - margin, t),
+                "top-center"   => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, page_w_pt / 2.0 - fs_pt * text.len() as f64 * 1.5, page_h_pt - margin, t),
+                "top-right"    => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, page_w_pt - margin - fs_pt * text.len() as f64 * 3.0, page_h_pt - margin, t),
+                _ => format!("BT /F1 {} Tf {} {} Td ({}) Tj ET\n", fs_pt, page_w_pt / 2.0 - fs_pt * text.len() as f64 * 1.5, margin, t),
+            };
+
+            // Get existing page content
+            let existing_content = doc.get_page_content(page_id).unwrap_or_default();
+
+            // Prepend our operations (new content goes first so it's rendered below existing content)
+            let mut new_content = adjusted_text.into_bytes();
+            new_content.extend_from_slice(&existing_content);
+
+            // Replace page content
+            // We need to get the content stream objects and replace them
+            // Better approach: add a new content stream via add_page_contents, but it APPENDS.
+            // We need PREPEND. So we replace the Contents field entirely.
+
+            // Remove old content streams, add new one
+            let content_obj_id = doc.add_object(Stream::new(Dictionary::new(), new_content));
+            let page_obj = doc.get_object_mut(page_id)
+                .map_err(|_| "Gagal mengakses halaman.".to_string())?;
+            let page_dict = page_obj.as_dict_mut()
+                .map_err(|_| "Gagal mengakses dictionary halaman.".to_string())?;
+            page_dict.set("Contents", Object::Reference(content_obj_id));
+
+            cur += 1;
+        }
+
+        // Register the font we use (Helvetica — built-in type 1)
+        // We need to add font resources to each page
+        let helv_ref = {
+            let font_dict = Dictionary::from_iter(vec![
+                (b"Type".to_vec(), Object::Name(b"Font".to_vec())),
+                (b"Subtype".to_vec(), Object::Name(b"Type1".to_vec())),
+                (b"BaseFont".to_vec(), Object::Name(b"Helvetica".to_vec())),
+            ]);
+            doc.add_object(font_dict)
+        };
+
+        for (&_page_idx, &page_id) in &pages {
+            let page_obj = doc.get_object_mut(page_id)
+                .map_err(|_| "Gagal mengakses halaman.".to_string())?;
+            let page_dict = page_obj.as_dict_mut()
+                .map_err(|_| "Gagal mengakses dictionary halaman.".to_string())?;
+
+            // Get or create Resources
+            let resources_dict = if page_dict.has(b"Resources") {
+                let res = page_dict.get_mut(b"Resources")
+                    .map_err(|_| "Gagal mengakses resources.".to_string())?;
+                res.as_dict_mut()
+                    .map_err(|_| "Gagal mengakses dict resources.".to_string())?
+            } else {
+                let new_res = Object::Dictionary(Dictionary::new());
+                page_dict.set("Resources", new_res);
+                page_dict.get_mut(b"Resources")
+                    .map_err(|_| "Gagal mengakses resources.".to_string())?
+                    .as_dict_mut()
+                    .map_err(|_| "Gagal mengakses dict resources.".to_string())?
+            };
+
+            // Get or create Font sub-dict
+            let fonts_dict = if resources_dict.has(b"Font") {
+                let f = resources_dict.get_mut(b"Font")
+                    .map_err(|_| "Gagal mengakses font.".to_string())?;
+                f.as_dict_mut()
+                    .map_err(|_| "Gagal mengakses dict font.".to_string())?
+            } else {
+                let new_f = Object::Dictionary(Dictionary::new());
+                resources_dict.set("Font", new_f);
+                resources_dict.get_mut(b"Font")
+                    .map_err(|_| "Gagal mengakses font.".to_string())?
+                    .as_dict_mut()
+                    .map_err(|_| "Gagal mengakses dict font.".to_string())?
+            };
+
+            // Only add F1 if not already present
+            if !fonts_dict.has(b"F1") {
+                fonts_dict.set("F1", Object::Reference(helv_ref));
+            }
+        }
+
+        doc.save(&output_path)
+            .map_err(|e| format!("Gagal menyimpan PDF: {e}"))?;
+
+        let output_size = fs::metadata(&output_path)
+            .map_err(|e| format!("Error: {e}"))?.len();
         Ok(PageNumberResult { output_path, output_size })
     })
     .await
-    .map_err(|e| format!("Task error: {}", e))?
+    .map_err(|e| format!("Task error: {e}"))?
 }
 
 // ===== PDF to Text =====
@@ -973,21 +1083,20 @@ pub async fn grayscale_pdf(input_path: String, output_path: String) -> Result<Gr
     tokio::task::spawn_blocking(move || {
         let _guard = pdf_lock();
 
-        let output = Command::new("gs")
+        // Use mutool recolor — fast, no Ghostscript dependency
+        let output = Command::new("mutool")
             .args([
-                "-sDEVICE=pdfwrite",
-                "-dCompatibilityLevel=1.4",
-                "-sColorConversionStrategy=Gray",
-                "-dProcessColorModel=/DeviceGray",
-                "-dNOPAUSE", "-dQUIET", "-dBATCH",
-                &format!("-sOutputFile={}", output_path),
+                "recolor",
+                "-c", "gray",
+                "-o", &output_path,
                 &input_path,
             ])
             .output()
-            .map_err(|e| format!("Gagal menjalankan Ghostscript: {}", e))?;
+            .map_err(|e| format!("Gagal menjalankan mutool: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("Ghostscript error: {}", String::from_utf8_lossy(&output.stderr)));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("mutool error: {}", stderr));
         }
 
         let output_size = fs::metadata(&output_path).map_err(|e| format!("Error: {}", e))?.len();

@@ -1,8 +1,16 @@
 {
   "name": "pdflinux",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Privacy-first PDF tools for Linux, Windows & macOS — runs 100% offline",
-  "keywords": ["pdf", "linux", "windows", "tools", "privacy", "tauri", "desktop"],
+  "keywords": [
+    "pdf",
+    "linux",
+    "windows",
+    "tools",
+    "privacy",
+    "tauri",
+    "desktop"
+  ],
   "author": "saaandbite",
   "license": "MIT",
   "repository": {

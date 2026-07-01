@@ -90,7 +90,7 @@ function getPackageType(id, idLike) {
 function download(url, dest) {
   return new Promise((resolve, reject) => {
     const follow = url => {
-      https.get(url, { headers: { 'User-Agent': 'pdflinux-installer' } }, res => {
+      https.get(url, { headers: { 'User-Agent': 'pdf-chips-installer' } }, res => {
         if ([301, 302, 307, 308].includes(res.statusCode)) {
           return follow(res.headers.location);
         }
@@ -163,15 +163,15 @@ function installDeb(tmp) {
 
   // No-sudo fallback: extract binary with dpkg-deb
   console.log('  Trying user-level fallback (no sudo)...');
-  const extractDir = join(tmpdir(), 'pdflinux_extract');
+  const extractDir = join(tmpdir(), 'pdf_chips_extract');
   const localBin = join(homedir(), '.local', 'bin');
   mkdirSync(localBin, { recursive: true });
 
   try {
     execSync(`dpkg-deb -x "${tmp}" "${extractDir}"`, { stdio: 'inherit' });
-    const extracted = join(extractDir, 'usr', 'bin', 'pdflinux');
+    const extracted = join(extractDir, 'usr', 'bin', 'pdf-chips');
     if (existsSync(extracted)) {
-      const dest = join(localBin, 'pdflinux');
+      const dest = join(localBin, 'pdf-chips');
       copyFileSync(extracted, dest);
       chmodSync(dest, 0o755);
       ensureLocalBinInPath(localBin);
@@ -183,7 +183,7 @@ function installDeb(tmp) {
     console.warn(`  ⚠  dpkg-deb extraction failed: ${e.message}`);
   }
 
-  console.error('\n  ✗ Could not install pdflinux.');
+  console.error('\n  ✗ Could not install pdf-chips.');
   console.error(`    Ask your system administrator to run:`);
   console.error(`      sudo apt-get install -y "${tmp}"`);
   process.exit(1);
@@ -195,7 +195,7 @@ function installRpm(tmp) {
   const ok = privRun(['dnf', 'install', '-y', `"${tmp}"`])
           || privRun(['yum', 'install', '-y', `"${tmp}"`]);
   if (!ok) {
-    console.error('\n  ✗ Could not install pdflinux (no sudo).');
+    console.error('\n  ✗ Could not install pdf-chips (no sudo).');
     console.error(`    Ask your admin to run: sudo dnf install -y "${tmp}"`);
     process.exit(1);
   }
